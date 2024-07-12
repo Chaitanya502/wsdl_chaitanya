@@ -21,7 +21,7 @@ public class PrintXSDPathsFromWSDL {
     public static void main(String[] args) {
         try {
             // Path to the WSDL file
-            String wsdlPath = "src/main/resources/your.wsdl";
+            String wsdlPath = "src/main/resources/wsdl/files/avc.wsdl";
             File wsdlFile = new File(wsdlPath);
 
             // Create WSDL reader
@@ -40,8 +40,11 @@ public class PrintXSDPathsFromWSDL {
                 }
             }
 
+            // Base directory for XSD files
+            File baseDir = new File("src/main/resources");
+
             // Remove leftover XSD files
-            removeLeftoverXSDs(wsdlFile.getParentFile(), referencedSchemas);
+            removeLeftoverXSDs(baseDir, referencedSchemas);
 
         } catch (WSDLException | ParserConfigurationException | IOException | SAXException e) {
             e.printStackTrace();
@@ -53,7 +56,7 @@ public class PrintXSDPathsFromWSDL {
         // Add the schema element's base URI to the set of referenced schemas
         String schemaBaseURI = schemaElement.getBaseURI();
         if (schemaBaseURI != null) {
-            referencedSchemas.add(schemaBaseURI);
+            referencedSchemas.add(new File(baseDir, schemaBaseURI).getCanonicalPath());
         }
 
         // Process <import> elements
@@ -62,8 +65,8 @@ public class PrintXSDPathsFromWSDL {
             Element importElement = (Element) importElements.item(i);
             String schemaLocation = importElement.getAttribute("schemaLocation");
             if (schemaLocation != null && !schemaLocation.isEmpty() && !referencedSchemas.contains(schemaLocation)) {
-                referencedSchemas.add(schemaLocation);
                 File importedSchemaFile = new File(baseDir, schemaLocation);
+                referencedSchemas.add(importedSchemaFile.getCanonicalPath());
                 processSchemaFile(importedSchemaFile, referencedSchemas);
             }
         }
@@ -74,11 +77,21 @@ public class PrintXSDPathsFromWSDL {
             Element includeElement = (Element) includeElements.item(i);
             String schemaLocation = includeElement.getAttribute("schemaLocation");
             if (schemaLocation != null && !schemaLocation.isEmpty() && !referencedSchemas.contains(schemaLocation)) {
-                referencedSchemas.add(schemaLocation);
                 File includedSchemaFile = new File(baseDir, schemaLocation);
+                referencedSchemas.add(includedSchemaFile.getCanonicalPath());
                 processSchemaFile(includedSchemaFile, referencedSchemas);
             }
         }
+    }
+
+    private static void processSchemaFile(File schemaFile, Set<String> referencedSchemas)
+            throws ParserConfigurationException, IOException, SAXException {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true);
+        DocumentBuilder builder = factory.newDocumentBuilder();
+        InputSource inputSource = new InputSource(schemaFile.getAbsolutePath());
+        Element schemaElement = builder.parse(inputSource).getDocumentElement();
+        processSchemaElement(schemaElement, referencedSchemas, schemaFile.getParentFile());
     }
 
     private static void removeLeftoverXSDs(File baseDir, Set<String> referencedSchemas) {
