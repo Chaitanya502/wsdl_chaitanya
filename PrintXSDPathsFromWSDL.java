@@ -81,33 +81,36 @@ public class PrintXSDPathsFromWSDL {
         }
     }
 
-    private static void processSchemaFile(File schemaFile, Set<String> referencedSchemas)
-            throws ParserConfigurationException, IOException, SAXException {
-        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-        factory.setNamespaceAware(true);
-        DocumentBuilder builder = factory.newDocumentBuilder();
-        InputSource inputSource = new InputSource(schemaFile.getAbsolutePath());
-        Element schemaElement = builder.parse(inputSource).getDocumentElement();
-        processSchemaElement(schemaElement, referencedSchemas, schemaFile.getParentFile());
+    private static void removeLeftoverXSDs(File baseDir, Set<String> referencedSchemas) {
+        // Recursively list all XSD files in the base directory and subdirectories
+        Set<File> xsdFiles = new HashSet<>();
+        listAllXSDFiles(baseDir, xsdFiles);
+
+        for (File xsdFile : xsdFiles) {
+            try {
+                String canonicalPath = xsdFile.getCanonicalPath();
+                // If the XSD file is not in the set of referenced schemas, delete it
+                if (!referencedSchemas.contains(canonicalPath)) {
+                    if (xsdFile.delete()) {
+                        System.out.println("Deleted unused XSD file: " + canonicalPath);
+                    } else {
+                        System.out.println("Failed to delete unused XSD file: " + canonicalPath);
+                    }
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
     }
 
-    private static void removeLeftoverXSDs(File baseDir, Set<String> referencedSchemas) {
-        // List all XSD files in the base directory
-        File[] xsdFiles = baseDir.listFiles((dir, name) -> name.endsWith(".xsd"));
-        if (xsdFiles != null) {
-            for (File xsdFile : xsdFiles) {
-                try {
-                    String canonicalPath = xsdFile.getCanonicalPath();
-                    // If the XSD file is not in the set of referenced schemas, delete it
-                    if (!referencedSchemas.contains(canonicalPath)) {
-                        if (xsdFile.delete()) {
-                            System.out.println("Deleted unused XSD file: " + canonicalPath);
-                        } else {
-                            System.out.println("Failed to delete unused XSD file: " + canonicalPath);
-                        }
-                    }
-                } catch (IOException e) {
-                    e.printStackTrace();
+    private static void listAllXSDFiles(File dir, Set<File> xsdFiles) {
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                if (file.isDirectory()) {
+                    listAllXSDFiles(file, xsdFiles);
+                } else if (file.getName().endsWith(".xsd")) {
+                    xsdFiles.add(file);
                 }
             }
         }
