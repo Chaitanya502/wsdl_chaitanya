@@ -53,20 +53,14 @@ public class PrintXSDPathsFromWSDL {
 
     private static void processSchemaElement(Element schemaElement, Set<String> referencedSchemas, File baseDir)
             throws ParserConfigurationException, IOException, SAXException {
-        // Add the schema element's base URI to the set of referenced schemas
-        String schemaBaseURI = schemaElement.getBaseURI();
-        if (schemaBaseURI != null) {
-            referencedSchemas.add(new File(baseDir, schemaBaseURI).getCanonicalPath());
-        }
-
         // Process <import> elements
         NodeList importElements = schemaElement.getElementsByTagNameNS("http://www.w3.org/2001/XMLSchema", "import");
         for (int i = 0; i < importElements.getLength(); i++) {
             Element importElement = (Element) importElements.item(i);
             String schemaLocation = importElement.getAttribute("schemaLocation");
-            if (schemaLocation != null && !schemaLocation.isEmpty() && !referencedSchemas.contains(schemaLocation)) {
-                File importedSchemaFile = new File(baseDir, schemaLocation);
-                referencedSchemas.add(importedSchemaFile.getCanonicalPath());
+            if (schemaLocation != null && !schemaLocation.isEmpty()) {
+                File importedSchemaFile = new File(baseDir, schemaLocation).getCanonicalFile();
+                referencedSchemas.add(importedSchemaFile.getAbsolutePath());
                 processSchemaFile(importedSchemaFile, referencedSchemas);
             }
         }
@@ -76,9 +70,9 @@ public class PrintXSDPathsFromWSDL {
         for (int i = 0; i < includeElements.getLength(); i++) {
             Element includeElement = (Element) includeElements.item(i);
             String schemaLocation = includeElement.getAttribute("schemaLocation");
-            if (schemaLocation != null && !schemaLocation.isEmpty() && !referencedSchemas.contains(schemaLocation)) {
-                File includedSchemaFile = new File(baseDir, schemaLocation);
-                referencedSchemas.add(includedSchemaFile.getCanonicalPath());
+            if (schemaLocation != null && !schemaLocation.isEmpty()) {
+                File includedSchemaFile = new File(baseDir, schemaLocation).getCanonicalFile();
+                referencedSchemas.add(includedSchemaFile.getAbsolutePath());
                 processSchemaFile(includedSchemaFile, referencedSchemas);
             }
         }
@@ -101,13 +95,13 @@ public class PrintXSDPathsFromWSDL {
 
         for (File xsdFile : xsdFiles) {
             try {
-                String canonicalPath = xsdFile.getCanonicalPath();
+                String absolutePath = xsdFile.getAbsolutePath();
                 // If the XSD file is not in the set of referenced schemas, delete it
-                if (!referencedSchemas.contains(canonicalPath)) {
+                if (!referencedSchemas.contains(absolutePath)) {
                     if (xsdFile.delete()) {
-                        System.out.println("Deleted unused XSD file: " + canonicalPath);
+                        System.out.println("Deleted unused XSD file: " + absolutePath);
                     } else {
-                        System.out.println("Failed to delete unused XSD file: " + canonicalPath);
+                        System.out.println("Failed to delete unused XSD file: " + absolutePath);
                     }
                 }
             } catch (IOException e) {
@@ -123,7 +117,11 @@ public class PrintXSDPathsFromWSDL {
                 if (file.isDirectory()) {
                     listAllXSDFiles(file, xsdFiles);
                 } else if (file.getName().endsWith(".xsd")) {
-                    xsdFiles.add(file);
+                    try {
+                        xsdFiles.add(file.getCanonicalFile());
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
                 }
             }
         }
