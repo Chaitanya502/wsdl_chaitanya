@@ -135,4 +135,22 @@ public class PrintXSDPathsFromWSDL {
             }
         }
     }
+
+    private static void removeEmptyDirectories(File dir) {
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                if (file.isDirectory()) {
+                    removeEmptyDirectories(file);
+                    if (file.list().length == 0) {
+                        if (file.delete()) {
+                            System.out.println("Deleted empty directory: " + file.getAbsolutePath());
+                        } else {
+                            System.out.println("Failed to delete empty directory: " + file.getAbsolutePath());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
