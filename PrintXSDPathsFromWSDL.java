@@ -32,11 +32,12 @@ public class PrintXSDPathsFromWSDL {
             // Get types from the WSDL
             Map<?, ?> types = definition.getTypes().getExtensibilityElements();
             Set<String> referencedSchemas = new HashSet<>();
+            Set<String> processedSchemas = new HashSet<>();
             for (Object type : types.values()) {
                 if (type instanceof javax.wsdl.extensions.schema.Schema) {
                     javax.wsdl.extensions.schema.Schema schema = (javax.wsdl.extensions.schema.Schema) type;
                     Element schemaElement = schema.getElement();
-                    processSchemaElement(schemaElement, referencedSchemas, wsdlFile.getParentFile());
+                    processSchemaElement(schemaElement, referencedSchemas, processedSchemas, wsdlFile.getParentFile());
                 }
             }
 
@@ -51,7 +52,7 @@ public class PrintXSDPathsFromWSDL {
         }
     }
 
-    private static void processSchemaElement(Element schemaElement, Set<String> referencedSchemas, File baseDir)
+    private static void processSchemaElement(Element schemaElement, Set<String> referencedSchemas, Set<String> processedSchemas, File baseDir)
             throws ParserConfigurationException, IOException, SAXException {
         // Process <import> elements
         NodeList importElements = schemaElement.getElementsByTagNameNS("http://www.w3.org/2001/XMLSchema", "import");
@@ -60,8 +61,12 @@ public class PrintXSDPathsFromWSDL {
             String schemaLocation = importElement.getAttribute("schemaLocation");
             if (schemaLocation != null && !schemaLocation.isEmpty()) {
                 File importedSchemaFile = new File(baseDir, schemaLocation).getCanonicalFile();
-                referencedSchemas.add(importedSchemaFile.getAbsolutePath());
-                processSchemaFile(importedSchemaFile, referencedSchemas);
+                String absolutePath = importedSchemaFile.getAbsolutePath();
+                if (!processedSchemas.contains(absolutePath)) {
+                    referencedSchemas.add(absolutePath);
+                    processedSchemas.add(absolutePath);
+                    processSchemaFile(importedSchemaFile, referencedSchemas, processedSchemas);
+                }
             }
         }
 
@@ -72,20 +77,24 @@ public class PrintXSDPathsFromWSDL {
             String schemaLocation = includeElement.getAttribute("schemaLocation");
             if (schemaLocation != null && !schemaLocation.isEmpty()) {
                 File includedSchemaFile = new File(baseDir, schemaLocation).getCanonicalFile();
-                referencedSchemas.add(includedSchemaFile.getAbsolutePath());
-                processSchemaFile(includedSchemaFile, referencedSchemas);
+                String absolutePath = includedSchemaFile.getAbsolutePath();
+                if (!processedSchemas.contains(absolutePath)) {
+                    referencedSchemas.add(absolutePath);
+                    processedSchemas.add(absolutePath);
+                    processSchemaFile(includedSchemaFile, referencedSchemas, processedSchemas);
+                }
             }
         }
     }
 
-    private static void processSchemaFile(File schemaFile, Set<String> referencedSchemas)
+    private static void processSchemaFile(File schemaFile, Set<String> referencedSchemas, Set<String> processedSchemas)
             throws ParserConfigurationException, IOException, SAXException {
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         factory.setNamespaceAware(true);
         DocumentBuilder builder = factory.newDocumentBuilder();
         InputSource inputSource = new InputSource(schemaFile.getAbsolutePath());
         Element schemaElement = builder.parse(inputSource).getDocumentElement();
-        processSchemaElement(schemaElement, referencedSchemas, schemaFile.getParentFile());
+        processSchemaElement(schemaElement, referencedSchemas, processedSchemas, schemaFile.getParentFile());
     }
 
     private static void removeLeftoverXSDs(File baseDir, Set<String> referencedSchemas) {
