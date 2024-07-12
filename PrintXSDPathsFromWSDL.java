@@ -1,21 +1,20 @@
-import javax.wsdl.Definition;
-import javax.wsdl.WSDLException;
-import javax.wsdl.factory.WSDLFactory;
-import javax.wsdl.xml.WSDLReader;
-import org.w3c.dom.Element;
-import org.w3c.dom.NodeList;
-import org.xml.sax.InputSource;
-import org.xml.sax.SAXException;
+import org.apache.cxf.wsdl11.WSDLManager;
+import org.apache.cxf.wsdl11.WSDLManagerImpl;
+import org.apache.cxf.wsdl11.WSDLServiceFactory;
+import org.apache.cxf.service.model.ServiceInfo;
+import org.apache.cxf.service.model.SchemaInfo;
 
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.parsers.ParserConfigurationException;
 import java.io.File;
-import java.io.IOException;
+import java.net.URI;
 import java.util.HashSet;
-import java.util.Map;
 import java.util.Set;
-
+/**
+  implementation 'org.apache.cxf:cxf-rt-core:4.0.3'
+    implementation 'org.apache.cxf:cxf-rt-frontend-jaxws:4.0.3'
+    implementation 'org.apache.cxf:cxf-rt-bindings-xml:4.0.3'
+    implementation 'org.apache.cxf:cxf-rt-wsdl:4.0.3'
+    implementation 'org.apache.cxf:cxf-rt-databinding-jaxb:4.0.3'
+**/
 public class PrintXSDPathsFromWSDL {
 
     public static void main(String[] args) {
@@ -23,68 +22,35 @@ public class PrintXSDPathsFromWSDL {
             // Path to the WSDL file
             String wsdlPath = "src/main/resources/your.wsdl";
             File wsdlFile = new File(wsdlPath);
+            URI wsdlURI = wsdlFile.toURI();
 
-            // Create WSDL reader
-            WSDLFactory factory = WSDLFactory.newInstance();
-            WSDLReader reader = factory.newWSDLReader();
-            Definition definition = reader.readWSDL(wsdlFile.getAbsolutePath());
+            // Create WSDL manager
+            WSDLManager wsdlManager = new WSDLManagerImpl();
+            WSDLServiceFactory factory = new WSDLServiceFactory(wsdlManager, wsdlURI.toString());
+            ServiceInfo serviceInfo = factory.create();
 
-            // Get types from the WSDL
-            Map types = definition.getTypes().getExtensibilityElements();
+            // Set to track processed schemas
             Set<String> processedSchemas = new HashSet<>();
-            for (Object type : types.values()) {
-                if (type instanceof javax.wsdl.extensions.schema.Schema) {
-                    javax.wsdl.extensions.schema.Schema schema = (javax.wsdl.extensions.schema.Schema) type;
-                    Element schemaElement = schema.getElement();
-                    processSchemaElement(schemaElement, processedSchemas, wsdlFile.getParentFile());
-                }
-            }
 
-        } catch (WSDLException | ParserConfigurationException | IOException | SAXException e) {
+            // Process each schema in the service
+            for (SchemaInfo schemaInfo : serviceInfo.getSchemas()) {
+                processSchema(schemaInfo, processedSchemas);
+            }
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private static void processSchemaElement(Element schemaElement, Set<String> processedSchemas, File baseDir)
-            throws ParserConfigurationException, IOException, SAXException {
-        // Print the schema element's base URI
-        String schemaBaseURI = schemaElement.getBaseURI();
-        if (schemaBaseURI != null) {
-            System.out.println(schemaBaseURI);
-        }
+    private static void processSchema(SchemaInfo schemaInfo, Set<String> processedSchemas) {
+        String schemaLocation = schemaInfo.getSystemId();
+        if (schemaLocation != null && !processedSchemas.contains(schemaLocation)) {
+            processedSchemas.add(schemaLocation);
+            System.out.println(schemaLocation);
 
-        // Process <import> elements
-        NodeList importElements = schemaElement.getElementsByTagNameNS("http://www.w3.org/2001/XMLSchema", "import");
-        for (int i = 0; i < importElements.getLength(); i++) {
-            Element importElement = (Element) importElements.item(i);
-            String schemaLocation = importElement.getAttribute("schemaLocation");
-            if (schemaLocation != null && !schemaLocation.isEmpty() && !processedSchemas.contains(schemaLocation)) {
-                processedSchemas.add(schemaLocation);
-                File importedSchemaFile = new File(baseDir, schemaLocation);
-                processSchemaFile(importedSchemaFile, processedSchemas);
+            // Recursively process imported and included schemas
+            for (SchemaInfo importedSchema : schemaInfo.getImportedSchemas()) {
+                processSchema(importedSchema, processedSchemas);
             }
         }
-
-        // Process <include> elements
-        NodeList includeElements = schemaElement.getElementsByTagNameNS("http://www.w3.org/2001/XMLSchema", "include");
-        for (int i = 0; i < includeElements.getLength(); i++) {
-            Element includeElement = (Element) includeElements.item(i);
-            String schemaLocation = includeElement.getAttribute("schemaLocation");
-            if (schemaLocation != null && !schemaLocation.isEmpty() && !processedSchemas.contains(schemaLocation)) {
-                processedSchemas.add(schemaLocation);
-                File includedSchemaFile = new File(baseDir, schemaLocation);
-                processSchemaFile(includedSchemaFile, processedSchemas);
-            }
-        }
-    }
-
-    private static void processSchemaFile(File schemaFile, Set<String> processedSchemas)
-            throws ParserConfigurationException, IOException, SAXException {
-        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-        factory.setNamespaceAware(true);
-        DocumentBuilder builder = factory.newDocumentBuilder();
-        InputSource inputSource = new InputSource(schemaFile.getAbsolutePath());
-        Element schemaElement = builder.parse(inputSource).getDocumentElement();
-        processSchemaElement(schemaElement, processedSchemas, schemaFile.getParentFile());
     }
 }
