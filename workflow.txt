@@ -1,0 +1,31 @@
+Upload Api workflow:
+
+When authenticated user upload csv file and click on upload button
+Then multi-part request is send to photon-llm-judge-service
+/documents/{documentType}/upload handler of photon-llm-judge-service takes the request
+The handler performs 
+1)Validations on file_size ,file_type, file_content, whether other file upload in progress by same user,
+2)Upload the file to configured amazon s3 bucket in application.properties using s3 client.
+3)On successful file upload, Create entry in documents table else throw an custom generic exception saying "Service Unavailable Please try after sometime"
+4)On successful file upload, Publish document payload to kafka topic and update entry in documents table with is_published_for_reporting field to true on success.
+5)In case of failure, Do retry configured number of times. If it is successfull within retry limit, set is_published_for_reporting to true.
+6)Return 201 status in case atleast file upload is successfull and document entry is created.
+7)Return 400 status in case of validation failure.
+8)Return 503 status if upload to s3 bucket is not successfull
+
+Report Api Wokflow:
+
+Given when reporting details are recieved,
+Check whether the report with documentId already exists, Then update the entry with reporting status and updated_at fields and return 200 ok
+else create an report entry in reports table with reportId, documentId, status etc and return 201 craeted.
+
+Reporting WorkFlow:
+
+1)The kafka consumer of Evaluation engine consume the payload from kafka topic
+2)The payload has details like documentId, fileName and s3 location details of uploaded document.
+3)Get the document from s3 bucket using s3 location details.
+4)Perform the evaluation and upload the output files to same s3 location with _output suffix to fileName.
+5)On failure during evaluation or upload failure or upload success, 
+publish the reporting status to report api of photon-llm-judge-service with payload. Payload takes documentId, reportStatus.
+
+
