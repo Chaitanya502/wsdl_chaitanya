@@ -28,4 +28,9 @@ Reporting WorkFlow:
 5)On failure during evaluation or upload failure or upload success, 
 publish the reporting status to report api of photon-llm-judge-service with payload. Payload takes documentId, reportStatus.
 
+List Reports:
 
+When authenticated user clicks on report tab,
+It takes us to reports page where /reports api call is made to fetch all reports for documents published by user.
+Response should have reportId, reportStatus, reportLink.
+In case of no documents list will be empty
