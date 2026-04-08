@@ -1,36 +1,204 @@
-Upload Api workflow:
+package com.example.redis.auth;
 
-When authenticated user upload csv file and click on upload button
-Then multi-part request is send to photon-llm-judge-service
-/documents/{documentType}/upload handler of photon-llm-judge-service takes the request
-The handler performs 
-1)Validations on file_size ,file_type, file_content, whether other file upload in progress by same user,
-2)Upload the file to configured amazon s3 bucket in application.properties using s3 client.
-3)On successful file upload, Create entry in documents table else throw an custom generic exception saying "Service Unavailable Please try after sometime"
-4)On successful file upload, Publish document payload to kafka topic and update entry in documents table with is_published_for_reporting field to true on success.
-5)In case of failure, Do retry configured number of times. If it is successfull within retry limit, set is_published_for_reporting to true.
-6)Return 201 status in case atleast file upload is successfull and document entry is created.
-7)Return 400 status in case of validation failure.
-8)Return 503 status if upload to s3 bucket is not successfull
+import java.time.Instant;
 
-Report Api Wokflow:
+public record CachedToken(
+        String token,
+        Instant expiresAt,
+        String accessKeyId   // fingerprint of the AWS creds that signed this token
+) {
+    /** True if we should proactively refresh (2-minute buffer before hard expiry). */
+    public boolean shouldRefresh() {
+        return Instant.now().isAfter(expiresAt.minusSeconds(120));
+    }
 
-Given when reporting details are recieved,
-Check whether the report with documentId already exists, Then update the entry with reporting status and updated_at fields and return 200 ok
-else create an report entry in reports table with reportId, documentId, status etc and return 201 craeted.
+    /** True if the creds that made this token are no longer active. */
+    public boolean credentialsChanged(String currentAccessKeyId) {
+        return !this.accessKeyId.equals(currentAccessKeyId);
+    }
+}
+package com.example.redis.auth;
 
-Reporting WorkFlow:
+import io.lettuce.core.RedisCredentials;
+import io.lettuce.core.RedisCredentialsProvider;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Mono;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.elasticache.auth.ElastiCacheAuthTokenGenerator;
+import software.amazon.awssdk.services.elasticache.auth.GenerateAuthTokenRequest;
 
-1)The kafka consumer of Evaluation engine consume the payload from kafka topic
-2)The payload has details like documentId, fileName and s3 location details of uploaded document.
-3)Get the document from s3 bucket using s3 location details.
-4)Perform the evaluation and upload the output files to same s3 location with _output suffix to fileName.
-5)On failure during evaluation or upload failure or upload success, 
-publish the reporting status to report api of photon-llm-judge-service with payload. Payload takes documentId, reportStatus.
+import java.time.Duration;
+import java.time.Instant;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
-List Reports:
+/**
+ * Lettuce CredentialsProvider that:
+ *  1. Caches IAM auth tokens keyed by region:host:port
+ *  2. Invalidates the cache when IRSA rotates AWS credentials (AKID fingerprint check)
+ *  3. Proactively refreshes 2 minutes before token expiry (12-min effective TTL vs 14-min hard limit)
+ *  4. Deduplicates concurrent refresh calls with a CompletableFuture mutex
+ *  5. Falls back to the stale token if STS is momentarily unreachable
+ */
+public class RedisIamTokenProvider implements RedisCredentialsProvider {
 
-When authenticated user clicks on report tab,
-It takes us to reports page where /reports api call is made to fetch all reports for documents published by user.
-Response should have reportId, reportStatus, reportLink.
-In case of no documents list will be empty
+    private static final Logger log = LoggerFactory.getLogger(RedisIamTokenProvider.class);
+
+    private static final Duration TOKEN_LIFETIME    = Duration.ofMinutes(14);
+    private static final Duration STALE_GRACE       = Duration.ofMinutes(5);
+
+    private final String host;
+    private final int    port;
+    private final String region;
+    private final String iamUser;     // the Redis IAM user configured on the cluster
+    private final AwsCredentialsProvider credentialsProvider;
+    private final ElastiCacheAuthTokenGenerator tokenGenerator;
+
+    // cache key → CachedToken
+    private final ConcurrentHashMap<String, CachedToken> tokenCache   = new ConcurrentHashMap<>();
+    // cache key → in-flight refresh future  (acts as a per-key mutex)
+    private final ConcurrentHashMap<String, CompletableFuture<String>> inflight = new ConcurrentHashMap<>();
+
+    public RedisIamTokenProvider(String host, int port, String region, String iamUser) {
+        this.host               = host;
+        this.port               = port;
+        this.region             = region;
+        this.iamUser            = iamUser;
+        this.credentialsProvider = DefaultCredentialsProvider.create();
+        this.tokenGenerator     = ElastiCacheAuthTokenGenerator.builder()
+                                        .region(Region.of(region))
+                                        .credentialsProvider(credentialsProvider)
+                                        .build();
+    }
+
+    /** Constructor for testing — inject your own providers. */
+    public RedisIamTokenProvider(
+            String host, int port, String region, String iamUser,
+            AwsCredentialsProvider credentialsProvider,
+            ElastiCacheAuthTokenGenerator tokenGenerator) {
+        this.host                = host;
+        this.port                = port;
+        this.region              = region;
+        this.iamUser             = iamUser;
+        this.credentialsProvider = credentialsProvider;
+        this.tokenGenerator      = tokenGenerator;
+    }
+
+    // ── Lettuce entry point ───────────────────────────────────────────────────
+
+    @Override
+    public Mono<RedisCredentials> resolveCredentials() {
+        return Mono.fromCompletionStage(this::resolveAsync);
+    }
+
+    // ── Core logic ────────────────────────────────────────────────────────────
+
+    private CompletableFuture<RedisCredentials> resolveAsync() {
+        return getTokenAsync()
+                .thenApply(token -> RedisCredentials.just(iamUser, token));
+    }
+
+    public CompletableFuture<String> getTokenAsync() {
+        String cacheKey       = buildCacheKey();
+        AwsCredentials creds  = credentialsProvider.resolveCredentials();
+        String currentAkid    = creds.accessKeyId();
+
+        CachedToken cached = tokenCache.get(cacheKey);
+
+        boolean needsRefresh =
+                cached == null
+                || cached.credentialsChanged(currentAkid)   // ← THE FIX: IRSA rotated
+                || cached.shouldRefresh();                   // proactive 12-min refresh
+
+        if (!needsRefresh) {
+            return CompletableFuture.completedFuture(cached.token());
+        }
+
+        // ── Mutex: if a refresh is already in flight, reuse it ────────────────
+        return inflight.computeIfAbsent(cacheKey, k -> {
+            log.debug("Redis IAM: refreshing token [key={}, reason={}]",
+                    cacheKey, refreshReason(cached, currentAkid));
+
+            return generateTokenAsync(cacheKey, currentAkid)
+                    .exceptionally(ex -> handleRefreshFailure(ex, cached, cacheKey))
+                    .whenComplete((token, ex) -> inflight.remove(cacheKey));
+        });
+    }
+
+    // ── Token generation ──────────────────────────────────────────────────────
+
+    private CompletableFuture<String> generateTokenAsync(String cacheKey, String akid) {
+        return CompletableFuture.supplyAsync(() -> {
+            GenerateAuthTokenRequest request = GenerateAuthTokenRequest.builder()
+                    .hostname(host)
+                    .port(port)
+                    .userName(iamUser)
+                    .build();
+
+            String token    = tokenGenerator.generateAuthToken(request);
+            Instant expires = Instant.now().plus(TOKEN_LIFETIME);
+
+            tokenCache.put(cacheKey, new CachedToken(token, expires, akid));
+            log.debug("Redis IAM: token refreshed [akid={}, expiresAt={}]", akid, expires);
+            return token;
+        });
+    }
+
+    // ── Stale-on-error fallback ───────────────────────────────────────────────
+
+    private String handleRefreshFailure(Throwable ex, CachedToken stale, String cacheKey) {
+        if (stale != null && Instant.now().isBefore(stale.expiresAt().plus(STALE_GRACE))) {
+            log.warn("Redis IAM: token refresh failed, using stale token for up to {}s [key={}]",
+                    STALE_GRACE.toSeconds(), cacheKey, ex);
+            return stale.token();
+        }
+        throw new RuntimeException("Redis IAM: token refresh failed and no usable stale token", ex);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private String buildCacheKey() {
+        return region + ":" + host + ":" + port;
+    }
+
+    private String refreshReason(CachedToken cached, String currentAkid) {
+        if (cached == null)                          return "no-cache";
+        if (cached.credentialsChanged(currentAkid)) return "credential-rotation";
+        return "proactive-ttl";
+    }
+}
+package com.example.redis.auth;
+
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.api.sync.RedisCommands;
+
+import java.time.Duration;
+
+public class RedisClientFactory {
+
+    public static RedisCommands<String, String> create(
+            String host, int port, String region, String iamUser) {
+
+        RedisIamTokenProvider provider = new RedisIamTokenProvider(host, port, region, iamUser);
+
+        RedisURI uri = RedisURI.builder()
+                .withHost(host)
+                .withPort(port)
+                .withSsl(true)                 // IAM auth requires TLS
+                .withVerifyPeer(true)
+                .withTimeout(Duration.ofSeconds(5))
+                .withAuthentication(provider)  // Lettuce calls resolveCredentials() on each connect/reconnect
+                .build();
+
+        RedisClient client = RedisClient.create(uri);
+        StatefulRedisConnection<String, String> connection = client.connect();
+        return connection.sync();
+    }
+}
+ProblemJava mechanismIRSA rotates AKID after 60 mincached.credentialsChanged(currentAkid) — compares AKID on every callOld token used in 1–10 min windowCache miss on AKID change forces generateAuthToken() immediatelyConcurrent refresh stampedeinflight.computeIfAbsent() — only first caller generates, rest await the same CompletableFutureToken expires mid-requestshouldRefresh() refreshes at 12-min mark, 2 min before the 14-min hard expirySTS hiccup during rotationhandleRefreshFailure() returns stale token for up to 5 extra minutes before hard-failingLettuce reconnect after errorresolveCredentials() is called by Lettuce on every reconnect, always gets a fresh check
